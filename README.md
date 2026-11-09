@@ -6,9 +6,9 @@ ahead of time to C and compiled for the Brick, with no emulation at run time.
 - 60 fps fights at the PSP's speed
 - 1024x768 in 4:3: more of each stage, with the HUD and menus laid out for it
 - Fight GUI toggle and Unlock Everything, in Deadstation Portable's Options
-- Remappable controls
 
-You need your own copy of the game (USA, ULUS10457) as a CHD.
+<img width="1024" height="768" alt="sc_20261109_081333" src="https://github.com/user-attachments/assets/ae690abb-6122-46ab-943e-d41fc323392b" />
+<img width="1024" height="768" alt="sc_20261109_081431" src="https://github.com/user-attachments/assets/2f9ee00e-48c8-4c4e-b7a0-8a7161dcbedb" />
 
 ---
 
