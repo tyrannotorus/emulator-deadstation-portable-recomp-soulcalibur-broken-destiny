@@ -1,0 +1,11 @@
+# builds, and anything made from the game's disc (never in git)
+/build*/
+/gen/
+*.iso
+*.chd
+*.elf
+*.bin
+*.ppm
+
+# local tooling, notes and release archives (never in git)
+/local/

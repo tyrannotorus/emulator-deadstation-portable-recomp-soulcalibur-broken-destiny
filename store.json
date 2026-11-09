@@ -1,0 +1,18 @@
+{
+  "description": "Soulcalibur: Broken Destiny (Namco Bandai, 2009), recompiled for the TrimUI Brick.",
+  "formats": [
+    {
+      "format": "CHD",
+      "region": "USA",
+      "sha1": "d288dd5cf5ef500f8e42263550e9b996022a5aad"
+    }
+  ],
+  "features": [
+    "60 fps fights at the PSP's speed",
+    "1024x768 in 4:3: more of each stage, HUD and menus laid out for it",
+    "Fight GUI toggle",
+    "Unlock Everything",
+    "Remappable controls"
+  ],
+  "changelog": []
+}
