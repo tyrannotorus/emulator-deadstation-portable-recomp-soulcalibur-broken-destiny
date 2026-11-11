@@ -14,6 +14,8 @@
     "Unlock Everything",
     "Remappable controls"
   ],
-  "changelog": [],
+  "changelog": [
+    "Fixed graphical bugs with 4:3 aspect ratio"
+  ],
   "repo": "https://github.com/tyrannotorus/emulator-deadstation-portable-recomp-soulcalibur-broken-destiny"
 }

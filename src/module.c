@@ -70,11 +70,54 @@ uint32_t sc_options_rows(uint32_t rows)
 }
 
 /* ---- once a frame, on the game's thread ---- */
+static unsigned s_frame;	/* game frames so far */
+
+/* (dev) DSP_FREEZE=FIRST,STEP,COUNT[,SECONDS[,PAIR]]: the game held for SECONDS (2) at game frames FIRST, FIRST + STEP, ... (and
+ * PAIR frames after each), the picture on the screen meanwhile, /tmp/sc-frozen naming the frame while it is held (a run's script
+ * takes its picture then). DSP_FRAMELOG=1: the frame count in the log each second. */
+static void dev_freeze(void)
+{
+	static int init, n_left, secs = 2, pair, paired;
+	static unsigned next, step, log_on;
+	s_frame++;
+	if (!init) {
+		init = 1;
+		const char *e = getenv("DSP_FREEZE");
+		if (e && sscanf(e, "%u,%u,%d,%d,%d", &next, &step, &n_left, &secs, &pair) < 3)
+			n_left = 0;
+		log_on = getenv("DSP_FRAMELOG") != NULL;
+	}
+	if (log_on && s_frame % 60u == 0u)
+		fprintf(stderr, "soulcalibur: frame %u at %llu ms\n", s_frame, (unsigned long long)now_ms());
+	const unsigned frame = s_frame;
+	if (n_left <= 0 || frame != next + (paired ? (unsigned)pair : 0u))
+		return;
+	FILE *f = fopen("/tmp/sc-frozen", "w");
+	if (f) {
+		fprintf(f, "%u\n", frame);
+		fclose(f);
+	}
+	const uint64_t until = now_ms() + (uint64_t)secs * 1000u;
+	while (now_ms() < until) {
+		struct timespec t = { 0, 20000000 };
+		nanosleep(&t, NULL);
+	}
+	remove("/tmp/sc-frozen");
+	if (pair > 0 && !paired) {
+		paired = 1;
+		return;
+	}
+	paired = 0;
+	n_left--;
+	next += step;
+}
+
 /* Unlock Everything holds the game's unlock records open: the Gauntlet's chapters (a byte at 0x08C5F120, 0x22 all) and the equipment
  * (six words and a halfword from 0x08C5F130). Every fighter and stage is open from the start anyway. */
 void sdk_module_frame(void)
 {
 	static int options_done;
+	dev_freeze();
 	if (!options_done++)
 		sr_w32(OPTIONS_ROW5, 6u);
 	if (!unlock_on())
@@ -99,12 +142,68 @@ static int vplus_rows(void)
 }
 int sdk_vplus_rows(void) { return vplus_rows(); }
 
+/* Each camera's culling planes (0x08A5F010, from its projection at camera+192 to planes at camera+800..876, read by the game's
+ * visibility tests) are made for the PSP's 272 rows: a perspective camera's top and bottom planes from P11, an ortho camera's from
+ * P11 and P31. Those terms scaled by 272 / (272 + 2 x rows), the planes as tall as the picture shown, so nothing wholly in the rows
+ * Vert+ adds is dropped as off the screen; the projection the game draws with is unchanged. */
+uint32_t sc_cull_y(uint32_t bits)
+{
+	const int rows = vplus_rows();
+	if (!rows)
+		return bits;
+	float f;
+	memcpy(&f, &bits, 4);
+	f *= 272.0f / (float)(272 + 2 * rows);
+	memcpy(&bits, &f, 4);
+	return bits;
+}
+
+/* The lens flare (0x0885E82C) projects its sun through the main camera and is drawn only while the sun's screen y, 0 at the PSP
+ * screen's top and 1 at its bottom, is within 0 to 1: with Vert+ the screen shown runs from -rows / 272 to 1 + rows / 272, mapped
+ * here onto 0 to 1, so a sun in the rows above or below has its flare as anywhere else. */
+uint32_t sc_screen_v(uint32_t bits)
+{
+	const int rows = vplus_rows();
+	if (!rows)
+		return bits;
+	float v;
+	memcpy(&v, &bits, 4);
+	const float k = (float)rows / 272.0f;
+	v = (v + k) / (1.0f + 2.0f * k);
+	memcpy(&bits, &v, 4);
+	return bits;
+}
+
 #define MESSAGE_DY 34.0f	/* a menu's message box: below the picture, above the button hints */
 #define MENU_UP 22.0f		/* a menu with a title bar: its contents raised, the bar over the picture's top as on the PSP */
 
-/* the SDK's description of a 2D draw (ge_gpu.c, ge.c): what the module may change in it is dy, skip and extend */
+/* the SDK's description of a 2D draw (ge_gpu.c, ge.c): what the module may change in it is dy, skip, extend and zoom */
 typedef struct { uint32_t tex_addr; int tex_enable; int through; float x0, y0, x1, y1; float dy; int skip;
-				 float u0, v0, u1, v1; int tex_w, tex_h; int extend; int tnl; } SdkSpriteDraw;
+				 float u0, v0, u1, v1; int tex_w, tex_h; int extend; int tnl; float zoom; } SdkSpriteDraw;
+
+/* a 2D effect of a 3D scene (a lens flare's piece, a spark, smoke): a small texture the game keeps in VRAM, placed where its point
+ * of the scene projects, on the screen or off it. Drawn into Vert+'s rows like the scene around it, never laid out as a menu's or
+ * the HUD's piece (moved, it jumped 44 rows in and out of the rows above and below as it crossed a line) */
+static int scene_effect(const SdkSpriteDraw *d)
+{
+	return d->tex_enable && (d->tex_addr & 0x0FE00000u) == 0x04000000u && d->tex_w <= 64 && d->tex_h <= 64;
+}
+
+/* the fight's HUD, by its textures: the health bars, the timer's frame, the soul gauges, the names' font, the timer's digits (the
+ * big font's, not the round's banners: those fly in across the upper middle), and the message box at the bottom ("Acquired a new
+ * honor.": its body, frame and text) */
+static int hud_texture(const SdkSpriteDraw *d)
+{
+	switch (d->tex_addr) {
+	case 0x0900cee0u: case 0x09011330u: case 0x09013780u: case 0x09013c10u: case 0x08fe9420u:
+		return 1;
+	case 0x08fc8320u:
+		return d->y1 <= 48.0f;
+	case 0x08bc9540u: case 0x0900a6a0u:
+		return d->y0 >= 152.0f;
+	}
+	return 0;
+}
 
 /* menus and 2D screens */
 static void menu_draw(SdkSpriteDraw *d, int rows)
@@ -116,6 +215,10 @@ static void menu_draw(SdkSpriteDraw *d, int rows)
 	if (d->tex_enable && d->tex_h == 32 && d->x1 - d->x0 >= 470.0f && d->y0 >= 0.0f && d->y0 <= 4.0f && d->y1 >= 32.0f && d->y1 <= 36.0f)
 		title_ms = t;
 	const float up = title_ms && t - title_ms <= 2500u ? -MENU_UP : 0.0f;
+	if (up == 0.0f && scene_effect(d)) {
+		d->extend = 1;
+		return;
+	}
 
 	/* a message box ("New weapon unlocked."): its dark body (0x08bc9540 at rows 220-258), then its frame and ornaments (0x0900a6a0)
 	 * and its text (0x08fe9420) move together, so it covers nothing the PSP's screen showed */
@@ -143,22 +246,23 @@ static void menu_draw(SdkSpriteDraw *d, int rows)
 			d->dy = up;
 		return;
 	}
-	/* a background picture (a whole-width piece, or a tile drawn 1:1 from a large texture): its texture's rows above and below shown
-	 * too; a piece drawn from the same texture just after it is the same picture (some keep their bottom rows turned aside) */
+	/* a background picture (a whole-width piece, or a tile drawn 1:1 from a large texture): the whole picture zoomed about the
+	 * screen's centre to the picture's height (a little of its sides cropped), so it fills the rows above and below with picture,
+	 * not black, nor the texture's rows past the picture (another picture's, or garbage); a piece drawn from the same texture just
+	 * after it is the same picture (some keep their bottom rows turned aside) */
 	static uint32_t pic_tex;
 	static uint64_t pic_ms;
+	const float fill = (float)(272 + 2 * rows) / 272.0f;
 	if ((d->x1 - d->x0 >= 480.0f && d->y1 - d->y0 >= 48.0f) ||
 		(d->tex_enable && d->tex_w >= 256 && d->tex_h >= 256 && d->u0 > d->x0 - 1.0f && d->u0 < d->x0 + 1.0f &&
 		 d->v0 > d->y0 - 1.0f && d->v0 < d->y0 + 1.0f)) {
-		d->extend = 1;
-		d->dy = up;
+		d->zoom = fill;
 		if (d->tex_enable)
 			pic_tex = d->tex_addr, pic_ms = t;
 		return;
 	}
 	if (d->tex_enable && d->tex_addr == pic_tex && t - pic_ms <= 50u) {
-		d->extend = 1;
-		d->dy = up;
+		d->zoom = fill;
 		return;
 	}
 	/* a bar along the top edge, or one wholly in the bottom 32 rows (button hints): to the screen's edge; the rest with the screen,
@@ -180,10 +284,13 @@ void sdk_sprite_draw(SdkSpriteDraw *d)
 		hud_ms = now_ms();
 	const int fight = hud_ms && now_ms() - hud_ms <= 100u;
 	const int rows = vplus_rows();
-	/* a 2D T&L draw: in a fight, a small one within the health bars' rows is a bar's flash when its fighter is hit (HUD); any other is
-	 * an effect placed in the scene (sparks, smoke) and stays */
+	/* a 2D T&L draw: in a fight, a small one within the health bars' rows from the HUD's textures is a bar's flash when its fighter
+	 * is hit (0x092A6860) or the timer's (0x092530F0, 0x09257E60), HUD; any other is an effect placed in the scene (sparks, smoke)
+	 * and stays */
 	if (d->tnl) {
 		if (!fight || d->y0 < -16.0f || d->y1 > 52.0f || d->y1 - d->y0 > 64.0f || d->x1 - d->x0 > 96.0f)
+			return;
+		if (d->tex_addr != 0x092a6860u && d->tex_addr != 0x092530f0u && d->tex_addr != 0x09257e60u)
 			return;
 		if (gui_hidden())
 			d->skip = 1;
@@ -198,13 +305,19 @@ void sdk_sprite_draw(SdkSpriteDraw *d)
 			menu_draw(d, rows);
 		return;
 	}
-	/* the fight's HUD: a sprite less than half the screen tall wholly in the top part (bars, names, timer) or the bottom part
-	 * (messages); not a full-height layer, nor one across the middle (banners, effects) */
+	if (scene_effect(d)) {
+		d->extend = 1;
+		return;
+	}
+	/* the fight's HUD (hud_texture), wholly in the top part (bars, names, timer, gauges) or the bottom part (messages): to the
+	 * screen's edge, or hidden; any other 2D draw of the fight stays where the game puts it */
 	const float h = d->y1 - d->y0;
 	if (h >= 136.0f || (d->y0 <= 0.0f && d->y1 >= 272.0f))
 		return;
 	const int top = d->y1 <= 120.0f, bottom = d->y0 >= 152.0f;
 	if (!top && !bottom)
+		return;
+	if (!hud_texture(d))
 		return;
 	if (gui_hidden())
 		d->skip = 1;
